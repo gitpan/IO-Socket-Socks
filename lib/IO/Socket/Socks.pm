@@ -16,7 +16,7 @@
 #  Boston, MA  02111-1307, USA.
 #
 #  Copyright (C) 2003 Ryan Eatmon
-#  Copyright (C) 2010 Oleg G
+#  Copyright (C) 2010-2011 Oleg G
 #
 ##############################################################################
 package IO::Socket::Socks;
@@ -26,16 +26,68 @@ use IO::Socket;
 use IO::Select;
 use Errno qw(EWOULDBLOCK);
 use Carp;
-use base qw( IO::Socket::INET );
-use vars qw( @ISA @EXPORT $VERSION %CODES );
+use vars qw( @ISA @EXPORT @EXPORT_OK %EXPORT_TAGS $VERSION $SOCKS_ERROR $SOCKS5_RESOLVE $SOCKS4_RESOLVE %CODES );
 require Exporter;
 @ISA = qw(Exporter IO::Socket::INET);
 @EXPORT = qw( $SOCKS_ERROR );
+@EXPORT_OK = qw(
+    SOCKS5_VER
+    SOCKS4_VER
+    ADDR_IPV4
+    ADDR_DOMAINNAME
+    ADDR_IPV6
+    CMD_CONNECT
+    CMD_BIND
+    AUTHMECH_ANON
+    AUTHMECH_USERPASS
+    AUTHMECH_INVALID
+    AUTHREPLY_SUCCESS
+    AUTHREPLY_FAILURE
+    REPLY_SUCCESS
+    REPLY_GENERAL_FAILURE
+    REPLY_CONN_NOT_ALLOWED
+    REPLY_NETWORK_UNREACHABLE
+    REPLY_HOST_UNREACHABLE
+    REPLY_CONN_REFUSED
+    REPLY_TTL_EXPIRED
+    REPLY_CMD_NOT_SUPPORTED
+    REPLY_ADDR_NOT_SUPPORTED
+    REQUEST_GRANTED
+    REQUEST_FAILED
+    REQUEST_REJECTED_IDENTD
+    REQUEST_REJECTED_USERID
+);
+%EXPORT_TAGS = (constants => [qw(
+    SOCKS5_VER
+    SOCKS4_VER
+    ADDR_IPV4
+    ADDR_DOMAINNAME
+    ADDR_IPV6
+    CMD_CONNECT
+    CMD_BIND
+    AUTHMECH_ANON
+    AUTHMECH_USERPASS
+    AUTHMECH_INVALID
+    AUTHREPLY_SUCCESS
+    AUTHREPLY_FAILURE
+    REPLY_SUCCESS
+    REPLY_GENERAL_FAILURE
+    REPLY_CONN_NOT_ALLOWED
+    REPLY_NETWORK_UNREACHABLE
+    REPLY_HOST_UNREACHABLE
+    REPLY_CONN_REFUSED
+    REPLY_TTL_EXPIRED
+    REPLY_CMD_NOT_SUPPORTED
+    REPLY_ADDR_NOT_SUPPORTED
+    REQUEST_GRANTED
+    REQUEST_FAILED
+    REQUEST_REJECTED_IDENTD
+    REQUEST_REJECTED_USERID
+)]);
 
-$VERSION = "0.2";
-our $SOCKS_ERROR;
-our $SOCKS5_RESOLVE = 1;
-our $SOCKS4_RESOLVE = 0;
+$VERSION = "0.3";
+$SOCKS5_RESOLVE = 1;
+$SOCKS4_RESOLVE = 0;
 
 use constant SOCKS5_VER =>  5;
 use constant SOCKS4_VER =>  4;
@@ -45,7 +97,7 @@ use constant ADDR_DOMAINNAME => 3;
 use constant ADDR_IPV6       => 4;
 
 use constant CMD_CONNECT  => 1;
-#use constant CMD_BIND     => 2;
+use constant CMD_BIND     => 2;
 #use constant CMD_UDPASSOC => 3;
 
 use constant AUTHMECH_ANON     => 0;
@@ -127,31 +179,7 @@ sub configure
          delete($args->{ProxyPort}) :
          croak("You must provide a ProxyPort to either connect to, or listen on.")
         );
-
-    ${*$self}->{SOCKS}->{ConnectAddr} =
-        (exists($args->{ConnectAddr}) ?
-         delete($args->{ConnectAddr}) :
-         undef
-        );
-
-    ${*$self}->{SOCKS}->{ConnectPort} =
-        (exists($args->{ConnectPort}) ?
-         delete($args->{ConnectPort}) :
-         undef
-        );
     
-    #${*$self}->{SOCKS}->{BindAddr} =
-    #    (exists($args->{BindAddr}) ?
-    #     delete($args->{BindAddr}) :
-    #     undef
-    #    );
-
-    #${*$self}->{SOCKS}->{BindPort} =
-    #    (exists($args->{BindPort}) ?
-    #     delete($args->{BindPort}) :
-    #     undef
-    #    );
-
     ${*$self}->{SOCKS}->{AuthType} =
         (exists($args->{AuthType}) ?
          delete($args->{AuthType}) :
@@ -193,6 +221,12 @@ sub configure
          delete($args->{SocksDebug}) :
          0
         );
+        
+    ${*$self}->{SOCKS}->{Resolve} = 
+        (exists($args->{SocksResolve}) ?
+         delete($args->{SocksResolve}) :
+         undef
+        );
     
     ${*$self}->{SOCKS}->{AuthMethods} = [0,0,0];
     ${*$self}->{SOCKS}->{AuthMethods}->[AUTHMECH_ANON] = 1
@@ -205,10 +239,27 @@ sub configure
             (exists($args->{Listen}) &&
             defined(${*$self}->{SOCKS}->{UserAuth})));
     
-    ${*$self}->{SOCKS}->{COMMAND} = undef;
+    ${*$self}->{SOCKS}->{COMMAND} = [];
+    
+    if(exists($args->{BindAddr}) && exists($args->{BindPort}))
+    {
+        ${*$self}->{SOCKS}->{CmdAddr} = delete($args->{BindAddr});
+        ${*$self}->{SOCKS}->{CmdPort} = delete($args->{BindPort});
+        ${*$self}->{SOCKS}->{Bind} = 1;
+    }
+    elsif(exists($args->{ConnectAddr}) && exists($args->{ConnectPort}))
+    {
+        ${*$self}->{SOCKS}->{CmdAddr} = delete($args->{ConnectAddr});
+        ${*$self}->{SOCKS}->{CmdPort} = delete($args->{ConnectPort});
+    }
+    elsif(!exists($args->{Listen}))
+    {
+        croak("You must provide ConnectAddr and ConnectPort or BindAddr and BindPort");
+    }
 
     if (exists($args->{Listen}))
     {
+        ${*$self}->{SOCKS}->{Listen} = 1;
         $args->{LocalAddr} = ${*$self}->{SOCKS}->{ProxyAddr};
         $args->{LocalPort} = ${*$self}->{SOCKS}->{ProxyPort};
         $args->{Reuse} = 1;
@@ -270,7 +321,8 @@ sub connect
     #--------------------------------------------------------------------------    
     if(${*$self}->{SOCKS}->{Version} == 4)
     {
-        return unless $self->_socks4_connect();
+        return unless $self->_socks4_connect_command( ${*$self}->{SOCKS}->{Bind} ? CMD_BIND : CMD_CONNECT ) &&
+                      $self->_socks4_connect_reply();
         return $self;
     }
     
@@ -289,18 +341,8 @@ sub connect
     #--------------------------------------------------------------------------
     # Send the command (CONNECT/BIND/UDP)
     #--------------------------------------------------------------------------
-    if (defined(${*$self}->{SOCKS}->{ConnectAddr}) &&
-        defined(${*$self}->{SOCKS}->{ConnectPort}))
-    {
-        return unless $self->_socks5_connect_command(CMD_CONNECT);
-
-        #if (defined(${*$self}->{SOCKS}->{BindPort}))
-        #{
-        #    ${*$self}->{SOCKS}->{BindAddr} = ${*$self}->{SOCKS}->{ProxyAddr}
-        #        unless defined(${*$self}->{SOCKS}->{BindAddr});
-        #    return unless $self->_socks5_connect_command(CMD_BIND);
-        #}
-    }
+    return unless $self->_socks5_connect_command( ${*$self}->{SOCKS}->{Bind} ? CMD_BIND : CMD_CONNECT ) &&
+                  $self->_socks5_connect_reply();
 
     return $self;
 }
@@ -314,7 +356,7 @@ sub connect
 sub _socks5_connect
 {
     my $self = shift;
-    my $debug = IO::Socket::Socks::Debug->new() if(${*$self}->{SOCKS}->{Debug});
+    my $debug = IO::Socket::Socks::Debug->new() if ${*$self}->{SOCKS}->{Debug};
 
     #--------------------------------------------------------------------------
     # Send the auth mechanisms
@@ -341,9 +383,11 @@ sub _socks5_connect
     
     if($debug)
     {
-        $debug->add(ver => SOCKS5_VER);
-        $debug->add(nmethods => $nmethods);
-        $debug->add(methods => join('', unpack('C'x$nmethods, $methods)));
+        $debug->add(
+            ver => SOCKS5_VER,
+            nmethods => $nmethods,
+            methods => join('', unpack('C'x$nmethods, $methods))
+        );
         $debug->show('Send: ');
     }
 
@@ -363,8 +407,10 @@ sub _socks5_connect
 
     if($debug)
     {
-        $debug->add(ver => $version);
-        $debug->add(method => $auth_method);
+        $debug->add(
+            ver => $version,
+            method => $auth_method
+        );
         $debug->show('Recv: ');
     }
     
@@ -385,7 +431,7 @@ sub _socks5_connect
 sub _socks5_connect_auth
 {
     my $self = shift;
-    my $debug = IO::Socket::Socks::Debug->new() if(${*$self}->{SOCKS}->{Debug});
+    my $debug = IO::Socket::Socks::Debug->new() if ${*$self}->{SOCKS}->{Debug};
     
     #--------------------------------------------------------------------------
     # Send the auth
@@ -405,11 +451,13 @@ sub _socks5_connect_auth
     
     if($debug)
     {
-        $debug->add(ver => 1);
-        $debug->add(ulen => $ulen);
-        $debug->add(uname => $uname);
-        $debug->add(plen => $plen);
-        $debug->add(passwd => $passwd);
+        $debug->add(
+            ver => 1,
+            ulen => $ulen,
+            uname => $uname,
+            plen => $plen,
+            passwd => $passwd
+        );
         $debug->show('Send: ');
     }
     
@@ -429,8 +477,10 @@ sub _socks5_connect_auth
 
     if($debug)
     {
-        $debug->add(ver => $ver);
-        $debug->add(status => $status);
+        $debug->add(
+            ver => $ver,
+            status => $status
+        );
         $debug->show('Recv: ');
     }
 
@@ -453,8 +503,9 @@ sub _socks5_connect_command
 {
     my $self = shift;
     my $command = shift;
-    my $debug = IO::Socket::Socks::Debug->new() if(${*$self}->{SOCKS}->{Debug});
-
+    my $debug = IO::Socket::Socks::Debug->new() if ${*$self}->{SOCKS}->{Debug};
+    my $resolve = defined(${*$self}->{SOCKS}->{Resolve}) ? ${*$self}->{SOCKS}->{Resolve} : $SOCKS5_RESOLVE;
+    
     #--------------------------------------------------------------------------
     # Send the command
     #--------------------------------------------------------------------------
@@ -464,25 +515,37 @@ sub _socks5_connect_command
     # | 1  |  1  | X'00' |  1   | Variable |    2     |
     # +----+-----+-------+------+----------+----------+
     
-    my $atyp = $SOCKS5_RESOLVE ? ADDR_DOMAINNAME : ADDR_IPV4;
-    my $dstaddr = $SOCKS5_RESOLVE ? ${*$self}->{SOCKS}->{ConnectAddr} : inet_aton(${*$self}->{SOCKS}->{ConnectAddr});
-    my $hlen = length($dstaddr) if $SOCKS5_RESOLVE;
-    my $dstport = pack('n', ${*$self}->{SOCKS}->{ConnectPort});
+    my $atyp = $resolve ? ADDR_DOMAINNAME : ADDR_IPV4;
+    my $dstaddr = $resolve ? ${*$self}->{SOCKS}->{CmdAddr} : inet_aton(${*$self}->{SOCKS}->{CmdAddr});
+    my $hlen = length($dstaddr) if $resolve;
+    my $dstport = pack('n', ${*$self}->{SOCKS}->{CmdPort});
     $self->_socks_send(pack('CCCC', SOCKS5_VER, $command, 0, $atyp) . (defined($hlen) ? pack('C', $hlen) : '') . $dstaddr . $dstport)
         or return _timeout();
 
     if($debug)
     {
-        $debug->add(ver => SOCKS5_VER);
-        $debug->add(cmd => $command);
-        $debug->add(rsv => 0);
-        $debug->add(atyp => $atyp);
+        $debug->add(
+            ver => SOCKS5_VER,
+            cmd => $command,
+            rsv => 0,
+            atyp => $atyp
+        );
         $debug->add(hlen => $hlen) if defined $hlen;
-        $debug->add(dstaddr => $SOCKS5_RESOLVE ? $dstaddr : (length($dstaddr) == 4 ? inet_ntoa($dstaddr) : undef));
-        $debug->add(dstport => ${*$self}->{SOCKS}->{ConnectPort});
+        $debug->add(
+            dstaddr => $resolve ? $dstaddr : (length($dstaddr) == 4 ? inet_ntoa($dstaddr) : undef),
+            dstport => ${*$self}->{SOCKS}->{CmdPort}
+        );
         $debug->show('Send: ');
     }
+    
+    return 1;
+}
 
+sub _socks5_connect_reply
+{
+    my $self = shift;
+    my $debug = IO::Socket::Socks::Debug->new() if ${*$self}->{SOCKS}->{Debug};
+    
     #--------------------------------------------------------------------------
     # Read the reply
     #--------------------------------------------------------------------------
@@ -495,16 +558,19 @@ sub _socks5_connect_command
     my $reply = $self->_socks_read(4)
         or return _timeout();
     
-    my ($ver, $rep, $rsv);
-    ($ver, $rep, $rsv, $atyp) = unpack('CCCC', $reply);
+    my ($ver, $rep, $rsv, $atyp) = unpack('CCCC', $reply);
     
     if($debug)
     {
-        $debug->add(ver => $ver);
-        $debug->add(rep => $rep);
-        $debug->add(rsv => $rsv);
-        $debug->add(atyp => $atyp);
+        $debug->add(
+            ver => $ver,
+            rep => $rep,
+            rsv => $rsv,
+            atyp => $atyp
+        );
     }
+    
+    my ($bndaddr, $bndport);
     
     if ($atyp == ADDR_DOMAINNAME)
     {
@@ -512,23 +578,25 @@ sub _socks5_connect_command
             or return _timeout();
         
         my $hlen = unpack('C', $reply);
-        my $bndaddr = $self->_socks_read($hlen)
+        $bndaddr = $self->_socks_read($hlen)
             or return _timeout();
         
         if($debug)
         {
-            $debug->add(hlen => $hlen);
-            $debug->add(bndaddr => $bndaddr);
+            $debug->add(
+                hlen => $hlen,
+                bndaddr => $bndaddr
+            );
         }
     }
     elsif ($atyp == ADDR_IPV4)
     {
         $reply = $self->_socks_read(4)
             or return _timeout();
+        $bndaddr = length($reply) == 4 ? inet_ntoa($reply) : undef;
         
         if($debug)
         {
-            my $bndaddr = length($reply) == 4 ? inet_ntoa($reply) : undef;
             $debug->add(bndaddr => $bndaddr);
         }
     }
@@ -540,10 +608,13 @@ sub _socks5_connect_command
     
     $reply = $self->_socks_read(2)
         or return _timeout();
+    $bndport = unpack('n', $reply);
+    
+    ${*$self}->{SOCKS}->{DstAddr} = $bndaddr;
+    ${*$self}->{SOCKS}->{DstPort} = $bndport;
     
     if($debug)
     {
-        my $bndport = unpack('n', $reply);
         $debug->add(bndport => $bndport);
         $debug->show('Recv: ');
     }
@@ -559,16 +630,18 @@ sub _socks5_connect_command
 
 ###############################################################################
 #
-# _socks4_connect - Send the opening handsake, and process the reply.
+# _socks4_connect_command - Send the opening handsake, and process the reply.
 #
 ###############################################################################
-sub _socks4_connect
+sub _socks4_connect_command
 {
     # http://ss5.sourceforge.net/socks4.protocol.txt
     # http://ss5.sourceforge.net/socks4A.protocol.txt
     
     my $self = shift;
-    my $debug = IO::Socket::Socks::Debug->new() if(${*$self}->{SOCKS}->{Debug});
+    my $command = shift;
+    my $debug = IO::Socket::Socks::Debug->new() if ${*$self}->{SOCKS}->{Debug};
+    my $resolve = defined(${*$self}->{SOCKS}->{Resolve}) ? ${*$self}->{SOCKS}->{Resolve} : $SOCKS4_RESOLVE;
     
     #--------------------------------------------------------------------------
     # Send the command
@@ -579,34 +652,45 @@ sub _socks4_connect
     # |  1  |  1  |    2     |       4       | variable |  1   |
     # +-----+-----+----------+---------------+----------+------+
     
-    my $cmd = 1;
-    my $dstaddr = $SOCKS4_RESOLVE ? inet_aton('0.0.0.1') : inet_aton(${*$self}->{SOCKS}->{ConnectAddr});
-    my $dstport = pack('n', ${*$self}->{SOCKS}->{ConnectPort});
+    my $dstaddr = $resolve ? inet_aton('0.0.0.1') : inet_aton(${*$self}->{SOCKS}->{CmdAddr});
+    my $dstport = pack('n', ${*$self}->{SOCKS}->{CmdPort});
     my $userid  = ${*$self}->{SOCKS}->{Username};
     my $dsthost;
-    if($SOCKS4_RESOLVE)
+    if($resolve)
     { # socks4a
-        $dsthost = ${*$self}->{SOCKS}->{ConnectAddr} . pack('C', 0);
+        $dsthost = ${*$self}->{SOCKS}->{CmdAddr} . pack('C', 0);
     }
     
-    $self->_socks_send(pack('CC', SOCKS4_VER, $cmd) . $dstport . $dstaddr . $userid . pack('C', 0) . $dsthost)
+    $self->_socks_send(pack('CC', SOCKS4_VER, $command) . $dstport . $dstaddr . $userid . pack('C', 0) . $dsthost)
         or return _timeout();
         
     if($debug)
     {
-        $debug->add(ver => SOCKS4_VER);
-        $debug->add(cmd => $cmd);
-        $debug->add(dstport => ${*$self}->{SOCKS}->{ConnectPort});
-        $debug->add(dstaddr => length($dstaddr) == 4 ? inet_ntoa($dstaddr) : undef);
-        $debug->add(userid => $userid);
-        $debug->add(null => 0);
+        $debug->add(
+            ver => SOCKS4_VER,
+            cmd => $command,
+            dstport => ${*$self}->{SOCKS}->{CmdPort},
+            dstaddr => length($dstaddr) == 4 ? inet_ntoa($dstaddr) : undef,
+            userid => $userid,
+            null => 0
+        );
         if($dsthost)
         {
-            $debug->add(dsthost => ${*$self}->{SOCKS}->{ConnectAddr});
-            $debug->add(null => 0);
+            $debug->add(
+                dsthost => ${*$self}->{SOCKS}->{CmdAddr},
+                null => 0
+            );
         }
         $debug->show('Send: ');
     }
+    
+    return 1;
+}
+
+sub _socks4_connect_reply
+{
+    my $self = shift;
+    my $debug = IO::Socket::Socks::Debug->new() if ${*$self}->{SOCKS}->{Debug};
     
     #--------------------------------------------------------------------------
     # Read the reply
@@ -621,15 +705,20 @@ sub _socks4_connect
         or return _timeout();
     
     my ($ver, $rep, $bndport) = unpack('CCn', $reply);
+    substr($reply, 0, 4) = '';
+    my $bndaddr = length($reply) == 4 ? inet_ntoa($reply) : undef;
+    
+    ${*$self}->{SOCKS}->{DstAddr} = $bndaddr;
+    ${*$self}->{SOCKS}->{DstPort} = $bndport;
+    
     if($debug)
     {
-        substr($reply, 0, 4) = '';
-        my $bndaddr = length($reply) == 4 ? inet_ntoa($reply) : undef;
-        
-        $debug->add(ver => $ver);
-        $debug->add(rep => $rep);
-        $debug->add(bndport => $bndport);
-        $debug->add(bndaddr => $bndaddr);
+        $debug->add(
+            ver => $ver,
+            rep => $rep,
+            bndport => $bndport,
+            bndaddr => $bndaddr
+        );
         $debug->show('Recv: ');
     }
     
@@ -641,7 +730,6 @@ sub _socks4_connect
     
     return 1;
 }
-
 
 ###############################################################################
 #+-----------------------------------------------------------------------------
@@ -661,37 +749,45 @@ sub accept
 
     croak("Undefined IO::Socket::Socks object passed to accept.")
         unless defined($self);
-
-    my $client = $self->SUPER::accept(@_);
-
-    if (!$client)
-    {
-        $SOCKS_ERROR = "Proxy accept new client failed.";
-        return;
-    }
     
-    # inherit some socket parameters
-    ${*$client}->{SOCKS}->{Debug}   = ${*$self}->{SOCKS}->{Debug};
-    ${*$client}->{SOCKS}->{Version} = ${*$self}->{SOCKS}->{Version};
-    
-    if(${*$self}->{SOCKS}->{Version} == 4)
+    if(${*$self}->{SOCKS}->{Listen})
     {
-        return unless $self->_socks4_accept_command($client);
+        my $client = $self->SUPER::accept(@_);
+
+        if (!$client)
+        {
+            $SOCKS_ERROR = "Proxy accept new client failed.";
+            return;
+        }
+        
+        # inherit some socket parameters
+        ${*$client}->{SOCKS}->{Debug}   = ${*$self}->{SOCKS}->{Debug};
+        ${*$client}->{SOCKS}->{Version} = ${*$self}->{SOCKS}->{Version};
+        
+        if(${*$self}->{SOCKS}->{Version} == 4)
+        {
+            return unless $self->_socks4_accept_command($client);
+        }
+        else
+        {
+            my $authmech = $self->_socks5_accept($client);
+            return unless defined($authmech);
+
+            if ($authmech == AUTHMECH_USERPASS)
+            {
+                return unless $self->_socks5_accept_auth($client);
+            }
+
+            return unless $self->_socks5_accept_command($client);
+        }
+
+        return $client;
     }
     else
     {
-        my $authmech = $self->_socks5_accept($client);
-        return unless defined($authmech);
-
-        if ($authmech == AUTHMECH_USERPASS)
-        {
-            return unless $self->_socks5_accept_auth($client);
-        }
-
-        return unless $self->_socks5_accept_command($client);
+        my $status = ${*$self}->{SOCKS}->{Version} == 4 ? $self->_socks4_connect_reply() : $self->_socks5_connect_reply();
+        return $status ? $self : undef;
     }
-
-    return $client;
 }
 
 
@@ -704,7 +800,7 @@ sub _socks5_accept
 {
     my $self = shift;
     my $client = shift;
-    my $debug = IO::Socket::Socks::Debug->new() if(${*$self}->{SOCKS}->{Debug});
+    my $debug = IO::Socket::Socks::Debug->new() if ${*$self}->{SOCKS}->{Debug};
 
     #--------------------------------------------------------------------------
     # Read the auth mechanisms
@@ -726,9 +822,11 @@ sub _socks5_accept
     
     if($debug)
     {
-        $debug->add(ver => $ver);
-        $debug->add(nmethods => $nmethods);
-        $debug->add(methods => join('', @methods));
+        $debug->add(
+            ver => $ver,
+            nmethods => $nmethods,
+            methods => join('', @methods)
+        );
         $debug->show('Recv: ');
     }
     
@@ -774,8 +872,10 @@ sub _socks5_accept
     
     if($debug)
     {
-        $debug->add(ver => SOCKS5_VER);
-        $debug->add(method => $authmech);
+        $debug->add(
+            ver => SOCKS5_VER,
+            method => $authmech
+        );
         $debug->show('Send: ');
     }
 
@@ -798,7 +898,7 @@ sub _socks5_accept_auth
 {
     my $self = shift;
     my $client = shift;
-    my $debug = IO::Socket::Socks::Debug->new() if(${*$self}->{SOCKS}->{Debug});
+    my $debug = IO::Socket::Socks::Debug->new() if ${*$self}->{SOCKS}->{Debug};
     
     #--------------------------------------------------------------------------
     # Read the auth
@@ -823,11 +923,13 @@ sub _socks5_accept_auth
     
     if($debug)
     {
-        $debug->add(ver => $ver);
-        $debug->add(ulen => $ulen);
-        $debug->add(uname => $uname);
-        $debug->add(plen => $plen);
-        $debug->add(passwd => $passwd);
+        $debug->add(
+            ver => $ver,
+            ulen => $ulen,
+            uname => $uname,
+            plen => $plen,
+            passwd => $passwd
+        );
         $debug->show('Recv: ');
     }
     
@@ -852,8 +954,10 @@ sub _socks5_accept_auth
     
     if($debug)
     {
-        $debug->add(ver => 1);
-        $debug->add(status => $status);
+        $debug->add(
+            ver => 1,
+            status => $status
+        );
         $debug->show('Send: ');
     }
     
@@ -877,7 +981,9 @@ sub _socks5_accept_command
 {
     my $self = shift;
     my $client = shift;
-    my $debug = IO::Socket::Socks::Debug->new() if(${*$self}->{SOCKS}->{Debug});
+    my $debug = IO::Socket::Socks::Debug->new() if ${*$self}->{SOCKS}->{Debug};
+    
+    @{${*$client}->{SOCKS}->{COMMAND}} = ();
 
     #--------------------------------------------------------------------------
     # Read the command
@@ -894,10 +1000,12 @@ sub _socks5_accept_command
     my ($ver, $cmd, $rsv, $atyp) = unpack('CCCC', $request);
     if($debug)
     {
-        $debug->add(ver => $ver);
-        $debug->add(cmd => $cmd);
-        $debug->add(rsv => $rsv);
-        $debug->add(atyp => $atyp);
+        $debug->add(
+            ver => $ver,
+            cmd => $cmd,
+            rsv => $rsv,
+            atyp => $atyp
+        );
     }
 
     my $dstaddr;
@@ -936,12 +1044,14 @@ sub _socks5_accept_command
     
     if($debug)
     {
-        $debug->add(dstaddr => $dstaddr);
-        $debug->add(dstport => $dstport);
+        $debug->add(
+            dstaddr => $dstaddr,
+            dstport => $dstport
+        );
         $debug->show('Recv: ');
     }
     
-    ${*$client}->{SOCKS}->{COMMAND} = [$cmd, $dstaddr, $dstport];
+    @{${*$client}->{SOCKS}->{COMMAND}} = ($cmd, $dstaddr, $dstport);
 
     return 1;
 }
@@ -960,7 +1070,8 @@ sub _socks5_accept_command_reply
     my $reply = shift;
     my $host = shift;
     my $port = shift;
-    my $debug = IO::Socket::Socks::Debug->new() if(${*$self}->{SOCKS}->{Debug});
+    my $debug = IO::Socket::Socks::Debug->new() if ${*$self}->{SOCKS}->{Debug};
+    my $resolve = defined(${*$self}->{SOCKS}->{Resolve}) ? ${*$self}->{SOCKS}->{Resolve} : $SOCKS5_RESOLVE;
 
     if (!defined($reply) || !defined($host) || !defined($port))
     {
@@ -976,21 +1087,25 @@ sub _socks5_accept_command_reply
     # | 1  |  1  | X'00' |  1   | Variable |    2     |
     # +----+-----+-------+------+----------+----------+
     
-    my $atyp = $SOCKS5_RESOLVE ? ADDR_DOMAINNAME : ADDR_IPV4;
-    my $bndaddr = $SOCKS5_RESOLVE ? $host : inet_aton($host);
-    my $hlen = length($bndaddr) if $SOCKS5_RESOLVE;
-    $self->_socks_send(pack('CCCC', SOCKS5_VER, $reply, 0, $atyp) . ($SOCKS5_RESOLVE ? pack('C', $hlen) : '') . $bndaddr . pack('n', $port))
+    my $atyp = $resolve ? ADDR_IPV4 : ADDR_DOMAINNAME;
+    my $bndaddr = $resolve ? inet_aton($host) : $host;
+    my $hlen = length($bndaddr) unless $resolve;
+    $self->_socks_send(pack('CCCC', SOCKS5_VER, $reply, 0, $atyp) . ($resolve ? '' : pack('C', $hlen)) . $bndaddr . pack('n', $port))
         or return _timeout();
     
     if($debug)
     {
-        $debug->add(ver => SOCKS5_VER);
-        $debug->add(rep => $reply);
-        $debug->add(rsv => 0);
-        $debug->add(atyp => $atyp);
-        $debug->add(hlen => $hlen) if $SOCKS5_RESOLVE;
-        $debug->add(bndaddr => $SOCKS5_RESOLVE ? $bndaddr : (length($bndaddr) == 4 ? inet_ntoa($bndaddr) : undef));
-        $debug->add(bndport => $port);
+        $debug->add(
+            ver => SOCKS5_VER,
+            rep => $reply,
+            rsv => 0,
+            atyp => $atyp
+        );
+        $debug->add(hlen => $hlen) unless $resolve;
+        $debug->add(
+            bndaddr => $resolve ? (length($bndaddr) == 4 ? inet_ntoa($bndaddr) : undef) : $bndaddr,
+            bndport => $port
+        );
         $debug->show('Send: ');
     }
 }
@@ -1008,7 +1123,10 @@ sub _socks4_accept_command
 {
     my $self = shift;
     my $client = shift;
-    my $debug = IO::Socket::Socks::Debug->new() if(${*$self}->{SOCKS}->{Debug});
+    my $debug = IO::Socket::Socks::Debug->new() if ${*$self}->{SOCKS}->{Debug};
+    my $resolve = defined(${*$self}->{SOCKS}->{Resolve}) ? ${*$self}->{SOCKS}->{Resolve} : $SOCKS4_RESOLVE;
+    
+    @{${*$client}->{SOCKS}->{COMMAND}} = ();
 
     #--------------------------------------------------------------------------
     # Read the auth mechanisms
@@ -1046,15 +1164,17 @@ sub _socks4_accept_command
     
     if($debug)
     {
-        $debug->add(ver => $ver);
-        $debug->add(cmd => $cmd);
-        $debug->add(dstport => $dstport);
-        $debug->add(dstaddr => $dstaddr);
-        $debug->add(userid => $userid);
-        $debug->add(null => 0);
+        $debug->add(
+            ver => $ver,
+            cmd => $cmd,
+            dstport => $dstport,
+            dstaddr => $dstaddr,
+            userid => $userid,
+            null => 0
+        );
     }
     
-    if($SOCKS4_RESOLVE && $dstaddr =~ /^0\.0\.0\.[1-9]/)
+    if($resolve && $dstaddr =~ /^0\.0\.0\.[1-9]/)
     { # socks4a
         my $dsthost = '';
         
@@ -1075,8 +1195,10 @@ sub _socks4_accept_command
         
         if($debug)
         {
-            $debug->add(dsthost => $dsthost);
-            $debug->add(null => 0);
+            $debug->add(
+                dsthost => $dsthost,
+                null => 0
+            );
         }
         
         $dstaddr = join('.', unpack('C4', (gethostbyname($dsthost))[4]));
@@ -1103,7 +1225,7 @@ sub _socks4_accept_command
         return;
     }
     
-    ${*$client}->{SOCKS}->{COMMAND} = [$cmd, $dstaddr, $dstport];
+    @{${*$client}->{SOCKS}->{COMMAND}} = ($cmd, $dstaddr, $dstport);
     
     return 1;
 }
@@ -1123,7 +1245,7 @@ sub _socks4_accept_command_reply
     my $reply = shift;
     my $host = shift;
     my $port = shift;
-    my $debug = IO::Socket::Socks::Debug->new() if(${*$self}->{SOCKS}->{Debug});
+    my $debug = IO::Socket::Socks::Debug->new() if ${*$self}->{SOCKS}->{Debug};
 
     if (!defined($reply) || !defined($host) || !defined($port))
     {
@@ -1145,10 +1267,12 @@ sub _socks4_accept_command_reply
     
     if($debug)
     {
-        $debug->add(ver => 0);
-        $debug->add(rep => $reply);
-        $debug->add(bndport => $port);
-        $debug->add(bndaddr => length($bndaddr) == 4 ? inet_ntoa($bndaddr) : undef);
+        $debug->add(
+            ver => 0,
+            rep => $reply,
+            bndport => $port,
+            bndaddr => length($bndaddr) == 4 ? inet_ntoa($bndaddr) : undef
+        );
         $debug->show('Send: ');
     }
 }
@@ -1186,6 +1310,17 @@ sub command_reply
 }
 
 ###############################################################################
+#
+# dst - access to the address and port selected by socks server when connect/bind
+#
+###############################################################################
+sub dst
+{
+    my $self = shift;
+    return (${*$self}->{SOCKS}->{DstAddr}, ${*$self}->{SOCKS}->{DstPort});
+}
+
+###############################################################################
 #+-----------------------------------------------------------------------------
 #| Helper Functions
 #+-----------------------------------------------------------------------------
@@ -1195,7 +1330,7 @@ sub _socks_send
     my $self = shift;
     my $data = shift;
     
-    my $blocking = $self->blocking(0) if(${*$self}{io_socket_timeout});
+    my $blocking = $self->blocking(0) if ${*$self}{io_socket_timeout};
     
     my $selector = IO::Select->new($self);
     my $start = time();
@@ -1289,46 +1424,44 @@ package IO::Socket::Socks::Debug;
 sub new
 {
     my ($class) = @_;
-    
-    my $self = {};
-    $self->{data} = [];
-    
+    my $self = [];
+
     bless $self, $class;
 }
 
 sub add
 {
-    my ($self, $name, $value) = @_;
-    push @{$self->{data}}, $name, $value;
+    my $self = shift;
+    push @{$self}, @_;
 }
 
 sub show
 {
     my ($self, $tag) = @_;
     
-    _separator($self->{data}, $tag);
-    _row($self->{data}, 0, $tag);
-    _separator($self->{data}, $tag);
-    _row($self->{data}, 1, $tag);
-    _separator($self->{data}, $tag);
+    $self->_separator($tag);
+    $self->_row(0, $tag);
+    $self->_separator($tag);
+    $self->_row(1, $tag);
+    $self->_separator($tag);
     
     print "\n";
     
-    @{$self->{data}} = ();
+    @{$self} = ();
 }
 
 sub _separator
 {
-    my $ref = shift;
-    my $tag = shift;
+    my $self = shift;
+    my $tag  = shift;
     my ($row1_len, $row2_len, $len);
     
     print $tag, '+';
     
-    for(my $i=0; $i<@$ref; $i+=2)
+    for(my $i=0; $i<@$self; $i+=2)
     {
-        $row1_len = length($ref->[$i]);
-        $row2_len = length($ref->[$i+1]);
+        $row1_len = length($self->[$i]);
+        $row2_len = length($self->[$i+1]);
         $len = ($row1_len > $row2_len ? $row1_len : $row2_len)+2;
         
         print '-' x $len, '+';
@@ -1339,20 +1472,20 @@ sub _separator
 
 sub _row
 {
-    my $ref = shift;
-    my $row = shift;
-    my $tag = shift;
+    my $self = shift;
+    my $row  = shift;
+    my $tag  = shift;
     my ($row1_len, $row2_len, $len);
     
     print $tag, '|';
     
-    for(my $i=0; $i<@$ref; $i+=2)
+    for(my $i=0; $i<@$self; $i+=2)
     {
-        $row1_len = length($ref->[$i]);
-        $row2_len = length($ref->[$i+1]);
+        $row1_len = length($self->[$i]);
+        $row2_len = length($self->[$i+1]);
         $len = ($row1_len > $row2_len ? $row1_len : $row2_len);
         
-        printf(' %-'.$len.'s |', $ref->[$i+$row]);
+        printf(' %-'.$len.'s |', $self->[$i+$row]);
     }
     
     print "\n";
@@ -1364,24 +1497,9 @@ __END__
 
 =head1 NAME
 
-IO::Socket::Socks
+IO::Socket::Socks - Provides a way to create socks client or server both 4 and 5 version.
 
 =head1 SYNOPSIS
-
-Provides a way to create socks client or server both 4 and 5 version.
-
-=head1 DESCRIPTION
-
-IO::Socket::Socks connects to a SOCKS proxy, tells it to open a
-connection to a remote host/port when the object is created.  The
-object you receive can be used directly as a socket for sending and
-receiving data from the remote host. In addition to create socks client
-this module could be used to create socks server. See examples below.
-
-=head1 EXAMPLES
-
-For complete examples of socks 4/5 client and server see `examples'
-subdirectory in the distribution.
 
 =head2 Client
 
@@ -1447,73 +1565,147 @@ subdirectory in the distribution.
       return 0;
   }
 
+=head1 DESCRIPTION
+
+IO::Socket::Socks connects to a SOCKS proxy, tells it to open a
+connection to a remote host/port when the object is created.  The
+object you receive can be used directly as a socket for sending and
+receiving data from the remote host. In addition to create socks client
+this module could be used to create socks server. See examples below.
+
+=head1 EXAMPLES
+
+For complete examples of socks 4/5 client and server see `examples'
+subdirectory in the distribution.
 
 =head1 METHODS
 
-=head2 new( %cfg )
+=head2 Socks Client
 
-Creates a new IO::Socket::Socks object.  It takes the following
+=head3
+new( %cfg )
+
+Creates a new IO::Socket::Socks client object.  It takes the following
 config hash:
 
-=head3 Client and Server
-
-  SocksVersion => 4 for socks v4; 5 for socks v5. Default is 5
-
+  SocksVersion => 4 for socks v4, 5 for socks v5. Default is 5
+  
+  Timeout => read/write/connect/accept timeout for the socket
+  
+  SocksResolve => resolve host name to ip by proxy server or 
+                  not (will resolve by client). This
+                  overrides value of $SOCKS4_RESOLVE or $SOCKS5_RESOLVE
+                  variable. Boolean.
+  
   SocksDebug => This will cause all of the SOCKS traffic to
                 be presented on the command line in a form
-                similar to the tables in the RFCs.
-                
-  Timeout => read/write/connect/accept timeout for the socket
-
-=head3 Client
-
+                similar to the tables in the RFCs. Boolean.
+  
   ProxyAddr => Hostname of the proxy
-
+  
   ProxyPort => Port of the proxy
   
   ConnectAddr => Hostname of the remote machine
-
+  
   ConnectPort => Port of the remote machine
-
+  
+  BindAddr => Hostname of the remote machine which will
+              connect to the proxy server after bind request
+  
+  BindPort => Port of the remote machine which will
+              connect to the proxy server after bind request
+  
   AuthType => What kind of authentication to support:
-                none       - no authentication (default)
-                userpass  - Username/Password. For socks5
-                proxy only.
-
+              none       - no authentication (default)
+              userpass  - Username/Password. For socks5
+              proxy only.
+  
   RequireAuth => Do not send ANON as a valid auth mechanism.
                  For socks5 proxy only
-
+  
   Username => For socks5 if AuthType is set to userpass, then
               you must provide a username. For socks4 proxy with
               this option you can specify userid.
-
+  
   Password => If AuthType is set to userpass, then you must
               provide a password. For socks5 proxy only.
 
-=head3 Server
+The following options should be specified:
 
-  ProxyAddr => Local host bind	address
+  ProxyAddr and ProxyPort
+  ConnectAddr and ConnectPort or BindAddr and BindPort
+
+Other options are facultative.
+
+=head3
+accept( )
+
+Accept an incoming connection after bind request. On failed returns undef.
+On success returns socket. No new socket created, returned socket is same
+on which this method was called. Because accept(2) is not invoked on the
+client side, socks server calls accept(2) and proxify all traffic via socket
+opened by client bind request. You can call accept only once on IO::Socket::Socks
+client socket.
+
+=head3
+dst( )
+
+Return (host, port) of the remote host after connect/accept or socks server
+after bind.
+
+=head2 Socks Server
+
+=head3
+new( %cfg )
+
+Creates a new IO::Socket::Socks server object.  It takes the following
+config hash:
+
+  SocksVersion => 4 for socks v4, 5 for socks v5. Default is 5
   
-  ProxyPort => Local host bind	port
+  Timeout => Timeout value for various operations
+  
+  SocksResolve => For socks v5: return destination address to the client
+                  in form of 4 bytes if true, otherwise in form of host
+                  length and host name.
+                  For socks v4: allow use socks4a protocol extension if
+                  true and not otherwise.
+                  This overrides value of $SOCKS4_RESOLVE or $SOCKS5_RESOLVE.
+  
+  SocksDebug => This will cause all of the SOCKS traffic to
+                be presented on the command line in a form
+                similar to the tables in the RFCs. Boolean.
+  
+  ProxyAddr => Local host bind address
+  
+  ProxyPort => Local host bind port
   
   UserAuth => Reference to a function that returns 1 if client
               allowed to use socks server, 0 otherwise. For
               socks5 proxy it takes login and password as
               arguments. For socks4 argument is userid.
-              
+  
   RequireAuth => Not allow anonymous access for socks5 proxy.
   
   Listen => Same as IO::Socket::INET listen option. Should be
-            specified as number > 0 for the server.
+            specified as number > 0.
 
-=head2 accept( )
+The following options should be specified:
+
+  Listen
+  ProxyAddr
+  ProxyPort
+
+Other options are facultative.
+
+=head3 accept( )
 
 Accept an incoming connection and return a new IO::Socket::Socks
 object that represents that connection.  You must call command()
 on this to find out what the incoming connection wants you to do,
 and then call command_reply() to send back the reply.
 
-=head2 command( )
+=head3 command( )
 
 After you call accept() the client has sent the command they want
 you to process.  This function returns a reference to an array with
@@ -1521,7 +1713,7 @@ the following format:
 
   [ COMMAND, HOST, PORT ]
 
-=head2 command_reply( REPLY CODE, HOST, PORT )
+=head3 command_reply( REPLY CODE, HOST, PORT )
 
 After you call command() the client needs to be told what the result
 is.  The REPLY CODE is as follows (integer value):
@@ -1543,6 +1735,7 @@ is.  The REPLY CODE is as follows (integer value):
   7: Command Not Supported
   8: Address Not Supported
 
+You can also use module constans. See below.
 HOST and PORT are the resulting host and port that you use for the
 command.
 
@@ -1560,6 +1753,7 @@ by proxy server, otherwise resolving will be done locally. Resolving
 host by socks proxy version 4 is extension to the protocol also known
 as socks4a. So, only socks4a proxy  supports resolving of hostnames.
 Default value of this variable is false. This variable is not importable.
+See also `SocksResolve' parameter in the constructor.
 
 =head2 $SOCKS5_RESOLVE
 
@@ -1567,6 +1761,37 @@ If this variable has true value resolving of host names will be done
 by proxy server, otherwise resolving will be done locally. Note: some
 bugous socks5 servers doesn't support resolving of host names. Default
 value is true. This variable is not importable.
+See also `SocksResolve' parameter in the constructor.
+
+=head1 CONSTANTS
+
+The following constants could be imported manually or using `:constans' tag:
+
+  SOCKS5_VER
+  SOCKS4_VER
+  ADDR_IPV4
+  ADDR_DOMAINNAME
+  ADDR_IPV6
+  CMD_CONNECT
+  CMD_BIND
+  AUTHMECH_ANON
+  AUTHMECH_USERPASS
+  AUTHMECH_INVALID
+  AUTHREPLY_SUCCESS
+  AUTHREPLY_FAILURE
+  REPLY_SUCCESS
+  REPLY_GENERAL_FAILURE
+  REPLY_CONN_NOT_ALLOWED
+  REPLY_NETWORK_UNREACHABLE
+  REPLY_HOST_UNREACHABLE
+  REPLY_CONN_REFUSED
+  REPLY_TTL_EXPIRED
+  REPLY_CMD_NOT_SUPPORTED
+  REPLY_ADDR_NOT_SUPPORTED
+  REQUEST_GRANTED
+  REQUEST_FAILED
+  REQUEST_REJECTED_IDENTD
+  REQUEST_REJECTED_USERID
 
 =head1 AUTHOR
 
@@ -1577,9 +1802,6 @@ Now maintained by Oleg G <oleg@cpan.org>
 =head1 COPYRIGHT
 
 This module is free software, you can redistribute it and/or modify
-it under the same terms as Perl itself.
+it under the terms of LGPL license.
 
 =cut
-
-#XXX document socks5 rfcs
-#XXX document SOCKS_ERROR
