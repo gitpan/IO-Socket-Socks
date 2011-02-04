@@ -1,4 +1,4 @@
-#!/usr/bin/perl
+#!/usr/bin/env perl
 
 use lib '../lib';
 use IO::Socket::Socks qw(:constants $SOCKS_ERROR);
@@ -6,10 +6,10 @@ use IO::Select;
 use strict;
 
 # return bind address as ip address like most socks5 proxyes does
-$IO::Socket::Socks::SOCKS5_RESOLVE = 0;
+$IO::Socket::Socks::SOCKS5_RESOLVE = 1;
 
 # create socks server
-my $server = IO::Socket::Socks->new(SocksVersion => 5, SocksDebug => 1, ProxyAddr => 'localhost', ProxyPort => 1090, Listen => 10)
+my $server = IO::Socket::Socks->new(SocksVersion => 5, SocksDebug => 1, ProxyAddr => 'localhost', ProxyPort => 1080, Listen => 10)
     or die $SOCKS_ERROR;
 
 # accept connections
@@ -133,6 +133,14 @@ while()
                 
                 last;
             }
+        }
+        elsif($cmd == CMD_UDPASSOC)
+        { # UDP associate
+            # who really need it?
+            # you could send me a patch
+            
+            warn 'UDP assoc: not implemented';
+            $client->command_reply(REPLY_GENERAL_FAILURE, $host, $port);
         }
         else
         {
