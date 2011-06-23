@@ -1,3 +1,9 @@
+0.5
+===
+  - Added support for non-blocking connect/bind operations on the client side
+  - $SOCKS_DEBUG variable added, debug now to STDERR instead STDOUT
+  - Real tests added
+
 0.4
 ===
   - UDP associate support added. It closes Bug #39216
@@ -13,7 +19,7 @@
 0.2
 ===
   - fixed possible SIGPIPE (Bug #62997)
-  - bloсking reading and writing replaced by non-blocking equivalents, so `Timeout' option now documented and works
+  - blocking reading and writing replaced by non-blocking equivalents, so `Timeout' option now documented and works
   - added support for socks v4, both server and client
   - some bug fixes
   
