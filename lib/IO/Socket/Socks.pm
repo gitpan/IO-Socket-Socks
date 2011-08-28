@@ -24,7 +24,7 @@ package IO::Socket::Socks;
 use strict;
 use IO::Socket;
 use IO::Select;
-use Errno qw(EWOULDBLOCK EAGAIN);
+use Errno qw(EWOULDBLOCK EAGAIN ENOTCONN);
 use Carp;
 use vars qw( @ISA @EXPORT @EXPORT_OK %EXPORT_TAGS $VERSION $SOCKS_ERROR $SOCKS5_RESOLVE $SOCKS4_RESOLVE $SOCKS_DEBUG %CODES );
 require Exporter;
@@ -67,7 +67,7 @@ use constant
 );
 %EXPORT_TAGS = (constants => ['SOCKS_WANT_READ', 'SOCKS_WANT_WRITE', @EXPORT_OK]);
 
-$VERSION = '0.5';
+$VERSION = '0.51';
 $SOCKS5_RESOLVE = 1;
 $SOCKS4_RESOLVE = 0;
 $SOCKS_DEBUG = $ENV{SOCKS_DEBUG};
@@ -372,6 +372,7 @@ sub _connect
 {
     my $self = shift;
     ${*$self}->{SOCKS}->{ready} = 0;
+    ${*$self}->{SOCKS}->{connected} = 0;
 
     if(${*$self}->{SOCKS}->{Version} == 4)
     {
@@ -1689,6 +1690,8 @@ sub _socks_send
             $rc = $self->syswrite($data);
             if(defined $rc)
             {
+                ${*$self}->{SOCKS}->{connected} = 1 unless ${*$self}->{SOCKS}->{connected};
+                
                 if($rc > 0)
                 {
                     ${*$self}->{SOCKS}->{queue}[0][Q_BUF] += $rc;
@@ -1699,7 +1702,8 @@ sub _socks_send
                     last;
                 }
             }
-            elsif($! == EWOULDBLOCK || $! == EAGAIN)
+            elsif($! == EWOULDBLOCK || $! == EAGAIN || 
+                 ($! == ENOTCONN && !${*$self}->{SOCKS}->{connected}))
             {
                 $SOCKS_ERROR = SOCKS_WANT_WRITE;
                 return undef;
@@ -2036,7 +2040,7 @@ subdirectory in the distribution.
 =head3 new_from_socket($socket, %cfg)
 
 Creates a new IO::Socket::Socks client object.  new_from_socket() is the same as
-new(), but allows to create object from an existing socket. Both takes the following
+new(), but allows one to create object from an existing socket. Both takes the following
 config hash:
 
   SocksVersion => 4 or 5. Default is 5
@@ -2146,7 +2150,7 @@ client socket.
 =head3
 command( %cfg )
 
-Allows to execute socks command on already opened socket. Thus you
+Allows one to execute socks command on already opened socket. Thus you
 can create socks chain. For example see L</EXAMPLES> section.
 
 %cfg is like hash in the constructor. Only options listed below makes sence:
@@ -2182,7 +2186,7 @@ after bind/udpassoc.
 =head3 new_from_socket($socket, %cfg)
 
 Creates a new IO::Socket::Socks server object. new_from_socket() is the same as
-new(), but allows to create object from an existing socket. Both takes the following
+new(), but allows one to create object from an existing socket. Both takes the following
 config hash:
 
   SocksVersion => 4 for socks v4, 5 for socks v5. Default is 5
