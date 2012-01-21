@@ -24,7 +24,7 @@ package IO::Socket::Socks;
 use strict;
 use IO::Socket;
 use IO::Select;
-use Errno qw(EWOULDBLOCK EAGAIN ENOTCONN);
+use Errno qw(EWOULDBLOCK EAGAIN ENOTCONN ETIMEDOUT);
 use Carp;
 use vars qw( @ISA @EXPORT @EXPORT_OK %EXPORT_TAGS $VERSION $SOCKS_ERROR $SOCKS5_RESOLVE $SOCKS4_RESOLVE $SOCKS_DEBUG %CODES );
 require Exporter;
@@ -33,10 +33,11 @@ use constant
 {
     SOCKS_WANT_READ  => 20,
     SOCKS_WANT_WRITE => 21,
+    ESOCKSPROTO => exists &Errno::EPROTO ? &Errno::EPROTO : 7000,
 };
 
 @ISA = qw(Exporter IO::Socket::INET);
-@EXPORT = qw( $SOCKS_ERROR SOCKS_WANT_READ SOCKS_WANT_WRITE );
+@EXPORT = qw( $SOCKS_ERROR SOCKS_WANT_READ SOCKS_WANT_WRITE ESOCKSPROTO );
 @EXPORT_OK = qw(
     SOCKS5_VER
     SOCKS4_VER
@@ -51,6 +52,8 @@ use constant
     AUTHMECH_INVALID
     AUTHREPLY_SUCCESS
     AUTHREPLY_FAILURE
+    ISS_UNKNOWN_ADDRESS
+    ISS_BAD_VERSION
     REPLY_SUCCESS
     REPLY_GENERAL_FAILURE
     REPLY_CONN_NOT_ALLOWED
@@ -66,8 +69,9 @@ use constant
     REQUEST_REJECTED_USERID
 );
 %EXPORT_TAGS = (constants => ['SOCKS_WANT_READ', 'SOCKS_WANT_WRITE', @EXPORT_OK]);
+$SOCKS_ERROR = new IO::Socket::Socks::Error;
 
-$VERSION = '0.60';
+$VERSION = '0.61';
 $SOCKS5_RESOLVE = 1;
 $SOCKS4_RESOLVE = 0;
 $SOCKS_DEBUG = $ENV{SOCKS_DEBUG};
@@ -91,7 +95,10 @@ use constant
     AUTHMECH_INVALID  => 255,
     
     AUTHREPLY_SUCCESS  => 0,
-    AUTHREPLY_FAILURE  => 1,
+    AUTHREPLY_FAILURE  => 10, # to not intersect with other socks5 constants
+    
+    ISS_UNKNOWN_ADDRESS => 500,
+    ISS_BAD_VERSION => 501,
 };
 
 $CODES{AUTHMECH}->[AUTHMECH_INVALID]   = "No valid auth mechanisms";
@@ -156,11 +163,16 @@ sub new_from_fd
     
     bless $sock, $class;
     
+    my $blocking = $sock->blocking;
     $sock->autoflush(1);
     ${*$sock}{'io_socket_timeout'} = delete $arg{Timeout};
     
-    return scalar(%arg) ? $sock->configure(\%arg)
-            : $sock;
+    scalar(%arg) or return $sock;
+    if ($sock = $sock->configure(\%arg) and !$blocking) {
+        $sock->blocking(0);
+    }
+    
+    return $sock;
 }
 
 *new_from_socket = \&new_from_fd;
@@ -357,7 +369,7 @@ sub connect
 
     if (!$sock)
     {
-        $SOCKS_ERROR = "Connection to proxy failed.";
+        $SOCKS_ERROR->set($!, $@ = "Connection to proxy failed: $!");
         return;
     }
 
@@ -532,7 +544,8 @@ sub _socks5_connect
     
     if ($auth_method == AUTHMECH_INVALID)
     {
-        $SOCKS_ERROR = $CODES{AUTHMECH}->[$auth_method];
+        $! = ESOCKSPROTO;
+        $SOCKS_ERROR->set(AUTHMECH_INVALID, $@ = $CODES{AUTHMECH}->[$auth_method]);
         return;
     }
 
@@ -622,7 +635,8 @@ sub _socks5_connect_auth
 
     if ($status != AUTHREPLY_SUCCESS)
     {
-        $SOCKS_ERROR = "Authentication failed with SOCKS5 proxy.";
+        $! = ESOCKSPROTO;
+        $SOCKS_ERROR->set(AUTHREPLY_FAILURE, $@ = "Authentication failed with SOCKS5 proxy");
         return;
     }
 
@@ -750,7 +764,8 @@ sub _socks5_connect_reply
     }
     else
     {
-        $SOCKS_ERROR = "Unsupported address type returned by socks server: $atyp";
+        $! = ESOCKSPROTO;
+        $SOCKS_ERROR->set(ISS_UNKNOWN_ADDRESS, $@ = "Unsupported address type returned by socks server: $atyp");
         return;
     }
     
@@ -769,7 +784,12 @@ sub _socks5_connect_reply
    
     if($rep != REPLY_SUCCESS)
     {
-        $SOCKS_ERROR = $CODES{REPLY}->{$rep};
+        $! = ESOCKSPROTO;
+        unless(exists $CODES{REPLY}->{$rep})
+        {
+            $rep = REPLY_GENERAL_FAILURE;
+        }
+        $SOCKS_ERROR->set($rep, $@ = $CODES{REPLY}->{$rep});
         return;
     }
 
@@ -803,8 +823,8 @@ sub _socks4_connect_command
     
     my $dstaddr = $resolve ? inet_aton('0.0.0.1') : inet_aton(${*$self}->{SOCKS}->{CmdAddr});
     my $dstport = pack('n', ${*$self}->{SOCKS}->{CmdPort});
-    my $userid  = ${*$self}->{SOCKS}->{Username};
-    my $dsthost;
+    my $userid  = ${*$self}->{SOCKS}->{Username} || '';
+    my $dsthost = '';
     if($resolve)
     { # socks4a
         $dsthost = ${*$self}->{SOCKS}->{CmdAddr} . pack('C', 0);
@@ -876,7 +896,12 @@ sub _socks4_connect_reply
     
     if($rep != REQUEST_GRANTED)
     {
-        $SOCKS_ERROR = $CODES{REPLY}->{$rep};
+        $! = ESOCKSPROTO;
+        unless(exists $CODES{REPLY}->{$rep})
+        {
+            $rep = REQUEST_FAILED;
+        }
+        $SOCKS_ERROR->set($rep, $@ = $CODES{REPLY}->{$rep});
         return;
     }
     
@@ -906,13 +931,15 @@ sub accept
     {
         my $client = $self->SUPER::accept(@_);
 
-        if (!$client)
+        if(!$client)
         {
-            if ($! == EAGAIN || $! == EWOULDBLOCK) {
-                $SOCKS_ERROR = SOCKS_WANT_READ;
+            if($! == EAGAIN || $! == EWOULDBLOCK)
+            {
+                $SOCKS_ERROR->set(SOCKS_WANT_READ, "Socks want read");
             }
-            else {
-                $SOCKS_ERROR = "Proxy accept new client failed.";
+            else
+            {
+                $SOCKS_ERROR->set($!, $@ = "Proxy accept new client failed: $!");
             }
             return;
         }
@@ -1009,13 +1036,15 @@ sub _socks5_accept
     
     if($ver != SOCKS5_VER)
     {
-        $SOCKS_ERROR = "Socks version should be 5, $ver recieved";
+        $! = ESOCKSPROTO;
+        $SOCKS_ERROR->set(ISS_BAD_VERSION, $@ = "Socks version should be 5, $ver recieved");
         return;
     }
     
     if ($nmethods == 0)
     {
-        $SOCKS_ERROR = "No auth methods sent";
+        $! = ESOCKSPROTO;
+        $SOCKS_ERROR->set(AUTHMECH_INVALID, $@ = "No auth methods sent");
         return;
     }
 
@@ -1058,7 +1087,8 @@ sub _socks5_accept
 
     if ($authmech == AUTHMECH_INVALID)
     {
-        $SOCKS_ERROR = "No available auth methods.";
+        $! = ESOCKSPROTO;
+        $SOCKS_ERROR->set(AUTHMECH_INVALID, $@ = "No available auth methods");
         return;
     }
     
@@ -1140,7 +1170,7 @@ sub _socks5_accept_auth
     # | 1  |   1    |
     # +----+--------+
     
-    $status = $status ? AUTHREPLY_SUCCESS : AUTHREPLY_FAILURE;
+    $status = $status ? AUTHREPLY_SUCCESS : 1; #XXX AUTHREPLY_FAILURE broken
     $request = $self->_socks_send(pack('CC', 1, $status), ++$sends)
         or return _fail($request);
     
@@ -1155,7 +1185,8 @@ sub _socks5_accept_auth
     
     if ($status != AUTHREPLY_SUCCESS)
     {
-        $SOCKS_ERROR = "Authentication failed with SOCKS5 proxy";
+        $! = ESOCKSPROTO;
+        $SOCKS_ERROR->set(AUTHREPLY_FAILURE, $@ = "Authentication failed with SOCKS5 proxy");
         return;
     }
     
@@ -1228,7 +1259,8 @@ sub _socks5_accept_command
         ${*$self}->{SOCKS}->{queue} = [
             ['_socks5_accept_command_reply', [REPLY_ADDR_NOT_SUPPORTED, '0.0.0.0', 0], undef, [], 0]
         ];
-        $SOCKS_ERROR = $CODES{REPLY}->{REPLY_ADDR_NOT_SUPPORTED};
+        $! = ESOCKSPROTO;
+        $SOCKS_ERROR->set(REPLY_ADDR_NOT_SUPPORTED, $@ = $CODES{REPLY}->{REPLY_ADDR_NOT_SUPPORTED});
         return 1;
     }
     
@@ -1415,14 +1447,16 @@ sub _socks4_accept_command
             ${*$self}->{SOCKS}->{queue} = [
                 ['_socks4_accept_command_reply', [REQUEST_REJECTED_USERID, '0.0.0.0', 0], undef, [], 0]
             ];
-            $SOCKS_ERROR = 'Authentication failed with SOCKS4 proxy.';
+            $! = ESOCKSPROTO;
+            $SOCKS_ERROR->set(REQUEST_REJECTED_USERID, $@ = 'Authentication failed with SOCKS4 proxy');
             return 1;
         }
     }
     
     if($ver != SOCKS4_VER)
     {
-        $SOCKS_ERROR = "Socks version should be 4, $ver recieved";
+        $! = ESOCKSPROTO;
+        $SOCKS_ERROR->set(ISS_BAD_VERSION, $@ = "Socks version should be 4, $ver recieved");
         return;
     }
     
@@ -1686,7 +1720,8 @@ sub recv
     }
     else
     {
-        $SOCKS_ERROR = "Unsupported address type returned by socks server: $atyp";
+        $! = ESOCKSPROTO;
+        $SOCKS_ERROR->set(ISS_UNKNOWN_ADDRESS, $@ = "Unsupported address type returned by socks server: $atyp");
         return;
     }
     
@@ -1712,17 +1747,17 @@ sub recv
 #+-----------------------------------------------------------------------------
 ###############################################################################
 sub _socks_send
-{
+{ # this sub may cause SIGPIPE if you'll not alternate it call with _socks_read()
     my $self = shift;
     my $data = shift;
     my $numb = shift;
     
-    $SOCKS_ERROR = undef;
+    $SOCKS_ERROR->set();
     my $rc;
     my $writed = 0;
     my $blocking = ${*$self}{io_socket_timeout} ? $self->blocking(0) : $self->blocking;
     
-    unless ($blocking || ${*$self}{io_socket_timeout})
+    unless($blocking || ${*$self}{io_socket_timeout})
     {
         if(${*$self}->{SOCKS}->{queue}[0][Q_SENDS] >= $numb)
         { # already sent
@@ -1747,19 +1782,19 @@ sub _socks_send
                     substr($data, 0, $rc) = '';
                 }
                 else
-                {
+                { # XXX: socket closed? if smth writed, but not all?
                     last;
                 }
             }
             elsif($! == EWOULDBLOCK || $! == EAGAIN || 
                  ($! == ENOTCONN && !${*$self}->{SOCKS}->{connected}))
             {
-                $SOCKS_ERROR = SOCKS_WANT_WRITE;
+                $SOCKS_ERROR->set(SOCKS_WANT_WRITE, 'Socks want write');
                 return undef;
             }
             else
             {
-                $SOCKS_ERROR = $!;
+                $SOCKS_ERROR->set($!, $@ = "send: $!");
                 last;
             }
         }
@@ -1773,8 +1808,14 @@ sub _socks_send
     my $selector = IO::Select->new($self);
     my $start = time();
     
-    while(!${*$self}{io_socket_timeout} || time() - $start < ${*$self}{io_socket_timeout})
+    while(1)
     {
+        if(${*$self}{io_socket_timeout} && time() - $start >= ${*$self}{io_socket_timeout})
+        {
+            $! = ETIMEDOUT;
+            last;
+        }
+        
         unless($selector->can_write(1))
         { # socket couldn't accept data for now, check if timeout expired and try again
             next;
@@ -1792,7 +1833,7 @@ sub _socks_send
         }
         else
         { # some error in the socket; will return false
-            $SOCKS_ERROR = $! unless defined $rc;
+            $SOCKS_ERROR->set($!, $@ = "send: $!") unless defined $rc;
             last;
         }
     }
@@ -1808,7 +1849,7 @@ sub _socks_read
     my $length = shift || 1;
     my $numb = shift;
     
-    $SOCKS_ERROR = undef;
+    $SOCKS_ERROR->set();
     my $data = '';
     my ($buf, $rc);
     my $blocking = $self->blocking;
@@ -1838,7 +1879,7 @@ sub _socks_read
                     $data .= $buf;
                 }
                 else
-                {
+                { # XXX: socket closed, if smth readed but not all?
                     last
                 }
             }
@@ -1848,12 +1889,12 @@ sub _socks_read
                 { # save already readed data in the queue buffer
                     ${*$self}->{SOCKS}->{queue}[0][Q_BUF] = $data;
                 }
-                $SOCKS_ERROR = SOCKS_WANT_READ;
+                $SOCKS_ERROR->set(SOCKS_WANT_READ, 'Socks want read');
                 return undef;
             }
             else
             {
-                $SOCKS_ERROR = $!;
+                $SOCKS_ERROR->set($!, $@ = "read: $!");
                 last;
             }
         }
@@ -1867,26 +1908,33 @@ sub _socks_read
     my $selector = IO::Select->new($self);
     my $start = time();
     
-    while($length > 0 && (!${*$self}{io_socket_timeout} || time() - $start < ${*$self}{io_socket_timeout}))
+    while($length > 0)
     {
+        if(${*$self}{io_socket_timeout} && time() - $start >= ${*$self}{io_socket_timeout})
+        {
+            $! = ETIMEDOUT;
+            last;
+        }
+        
         unless($selector->can_read(1))
         { # no data in socket for now, check if timeout expired and try again
             next;
         }
         
         $rc = $self->sysread($buf, $length);
-        if($rc > 0)
+        if(defined $rc && $rc > 0)
         { # reduce limit and modify buffer
             $length -= $rc;
             $data .= $buf;
         }
         else
         { # EOF or error in the socket
-            $SOCKS_ERROR = $! unless defined $rc;
-            last;
+            $SOCKS_ERROR->set($!, $@ = "read: $!") unless defined $rc;
+            last; # TODO handle unexpected EOF more correct
         }
     }
     
+    # XXX it may return incomplete $data if timed out. Could it break smth?
     return $data;
 }
 
@@ -1907,13 +1955,70 @@ sub _fail
 {
     if(!@_ || defined($_[0]))
     {
-        $SOCKS_ERROR = 'Timeout' unless defined $SOCKS_ERROR;
+        $SOCKS_ERROR->set(ETIMEDOUT, $@ = 'Timeout') if $SOCKS_ERROR == undef;
         return;
     }
     
     return -1;
 }
 
+###############################################################################
+#+-----------------------------------------------------------------------------
+#| Helper Package to bring some magic in $SOCKS_ERROR
+#+-----------------------------------------------------------------------------
+###############################################################################
+
+package IO::Socket::Socks::Error;
+
+use strict;
+use overload
+    '==' => \&num_eq,
+    '!=' => sub { !num_eq(@_) },
+    '""' => \&as_str,
+    '0+' => \&as_num;
+
+sub new
+{
+    my ($class, $num, $str) = @_;
+    
+    my $self = {
+        num => $num,
+        str => $str,
+    };
+    
+    bless $self, $class;
+}
+
+sub set
+{
+    my ($self, $num, $str) = @_;
+    
+    $self->{num} = defined $num ? int($num) : $num;
+    $self->{str} = $str;
+}
+
+sub as_str
+{
+    my $self = shift;
+    return $self->{str};
+}
+
+sub as_num
+{
+    my $self = shift;
+    return $self->{num};
+}
+
+sub num_eq
+{
+    my ($self, $num) = @_;
+    
+    unless(defined $num)
+    {
+        return !defined($self->{num});
+    }
+    return $self->{num} == int($num);
+}
 
 ###############################################################################
 #+-----------------------------------------------------------------------------
@@ -2355,23 +2460,22 @@ After you call command() the client needs to be told what the result
 is.  The REPLY CODE is as follows (integer value):
 
   For socks v4
-  90: request granted
-  91: request rejected or failed
-  92: request rejected becasue SOCKS server cannot connect to identd on the client
-  93: request rejected because the client program and identd report different user-ids
+  REQUEST_GRANTED(90): request granted
+  REQUEST_FAILED(91): request rejected or failed
+  REQUEST_REJECTED_IDENTD(92): request rejected becasue SOCKS server cannot connect to identd on the client
+  REQUEST_REJECTED_USERID(93): request rejected because the client program and identd report different user-ids
   
   For socks v5
-  0: Success
-  1: General Failure
-  2: Connection Not Allowed
-  3: Network Unreachable
-  4: Host Unreachable
-  5: Connection Refused
-  6: TTL Expired
-  7: Command Not Supported
-  8: Address Not Supported
+  REPLY_SUCCESS(0): Success
+  REPLY_GENERAL_FAILURE(1): General Failure
+  REPLY_CONN_NOT_ALLOWED(2): Connection Not Allowed
+  REPLY_NETWORK_UNREACHABLE(3): Network Unreachable
+  REPLY_HOST_UNREACHABLE(4): Host Unreachable
+  REPLY_CONN_REFUSED(5): Connection Refused
+  REPLY_TTL_EXPIRED(6): TTL Expired
+  REPLY_CMD_NOT_SUPPORTED(7): Command Not Supported
+  REPLY_ADDR_NOT_SUPPORTED(8): Address Not Supported
 
-You can also use module constans. See below.
 HOST and PORT are the resulting host and port that you use for the
 command.
 
@@ -2379,8 +2483,9 @@ command.
 
 =head2 $SOCKS_ERROR
 
-This scalar behaves like $! in that if undef is returned, this variable
-should contain a string reason for the error. Imported by default.
+This scalar behaves like $! in that if undef is returned. C<$SOCKS_ERROR> is IO::Socket::Socks::ERROR
+object with some overloaded operators. In string context this variable should contain a string reason for
+the error. In numeric context it contains error code.
 
 =head2 $SOCKS4_RESOLVE
 
@@ -2422,6 +2527,8 @@ The following constants could be imported manually or using `:constants' tag:
   AUTHMECH_INVALID
   AUTHREPLY_SUCCESS
   AUTHREPLY_FAILURE
+  ISS_UNKNOWN_ADDRESS
+  ISS_BAD_VERSION
   REPLY_SUCCESS
   REPLY_GENERAL_FAILURE
   REPLY_CONN_NOT_ALLOWED
@@ -2437,12 +2544,45 @@ The following constants could be imported manually or using `:constants' tag:
   REQUEST_REJECTED_USERID
   SOCKS_WANT_READ
   SOCKS_WANT_WRITE
+  ESOCKSPROTO
 
-SOCKS_WANT_READ and SOCKS_WANT_WRITE are imported by default.
+SOCKS_WANT_READ, SOCKS_WANT_WRITE and ESOCKSPROTO are imported by default.
+
+=head1 FAQ
+
+=over
+
+=item How to determine is connection to socks server (client accept) failed or some protocol error
+occurred?
+
+You can check $! variable. If $! == ESOCKSPROTO constant, then it was error in the protocol. Error
+description could be found in $SOCKS_ERROR.
+
+=item How to determine which error in the protocol occurred?
+
+You should compare C<$SOCKS_ERROR> with constants below:
+
+  AUTHMECH_INVALID
+  AUTHREPLY_FAILURE
+  ISS_UNKNOWN_ADDRESS # address type sent by client/server not supported by I::S::S
+  ISS_BAD_VERSION     # socks version sent by client/server != specified version
+  REPLY_GENERAL_FAILURE
+  REPLY_CONN_NOT_ALLOWED
+  REPLY_NETWORK_UNREACHABLE
+  REPLY_HOST_UNREACHABLE
+  REPLY_CONN_REFUSED
+  REPLY_TTL_EXPIRED
+  REPLY_CMD_NOT_SUPPORTED
+  REPLY_ADDR_NOT_SUPPORTED
+  REQUEST_FAILED
+  REQUEST_REJECTED_IDENTD
+  REQUEST_REJECTED_USERID
+
+=back
 
 =head1 BUGS
 
-The following options are not implemented and not planned:
+The following options are not implemented:
 
 =over
 
@@ -2454,7 +2594,7 @@ The following options are not implemented and not planned:
 
 =back
 
-However patches are welcome.
+Patches are welcome.
 
 =head1 SEE ALSO
 

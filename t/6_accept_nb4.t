@@ -21,8 +21,8 @@ sub _socks4_connect_command
 	
 	my $dstaddr = $resolve ? inet_aton('0.0.0.1') : inet_aton(${*$self}->{SOCKS}->{CmdAddr});
 	my $dstport = pack('n', ${*$self}->{SOCKS}->{CmdPort});
-	my $userid  = ${*$self}->{SOCKS}->{Username};
-	my $dsthost;
+	my $userid  = ${*$self}->{SOCKS}->{Username} || '';
+	my $dsthost = '';
 	if($resolve)
 	{ # socks4a
 		$dsthost = ${*$self}->{SOCKS}->{CmdAddr} . pack('C', 0);
@@ -174,7 +174,7 @@ while ($conn_cnt < CONN_CNT || $sel_read->count() > 1 || $sel_write->count() > 0
 		}
 		
 		my $res = Time::HiRes::time() - $start;
-		ok($res < 1, "ready() not blocked") or diag "$res sec.";
+		ok($res < 1, "ready() not blocked") or diag "$res sec spent";
 	}
 }
 

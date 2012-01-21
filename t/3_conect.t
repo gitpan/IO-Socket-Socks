@@ -3,6 +3,7 @@
 use Test::More;
 use IO::Socket::Socks;
 use IO::Select;
+use Time::HiRes 'time';
 use strict;
 require 't/subs.pm';
 
@@ -38,6 +39,9 @@ $sock = IO::Socket::Socks->new(
 	AuthType => 'userpass'
 );
 ok(!defined($sock), 'Socks 5 connect with auth and incorrect password');
+ok($! == ESOCKSPROTO, '$! == ESOCKSPROTO') or diag int($!), "!=", ESOCKSPROTO;
+ok($SOCKS_ERROR == IO::Socket::Socks::AUTHREPLY_FAILURE, '$SOCKS_ERROR == AUTHREPLY_FAILURE')
+    or diag int($SOCKS_ERROR), "!=", IO::Socket::Socks::AUTHREPLY_FAILURE;
 
 kill 15, $s_pid;
 ($s_pid, $s_host, $s_port) = make_socks_server(4, undef, undef, accept => 3, reply => 2);
@@ -46,20 +50,23 @@ $sock = IO::Socket::Socks->new(
 	SocksVersion => 4, ProxyAddr => $s_host, ProxyPort => $s_port, ConnectAddr => $h_host, ConnectPort => $h_port
 );
 ok(defined($sock), 'Socks 4 blocking connect success');
-ok(time()-$start >= 5, 'Socks 4 blocking connect time');
+my $time_spent = time()-$start;
+ok($time_spent >= 5, 'Socks 4 blocking connect time') or diag "$time_spent sec spent";
 
 $start = time();
 $sock = IO::Socket::Socks->new(
 	SocksVersion => 4, ProxyAddr => $s_host, ProxyPort => $s_port, ConnectAddr => $h_host, ConnectPort => $h_port, Blocking => 0
 );
 ok(defined($sock), 'Socks 4 non-blocking connect success');
-ok(time()-$start < 3, 'Socks 4 non-blocking connect time');
+$time_spent = time()-$start;
+ok($time_spent < 3, 'Socks 4 non-blocking connect time') or diag "$time_spent sec spent";
 my $sel = IO::Select->new($sock);
 my $i = 0;
 $start = time();
 until ($sock->ready) {
 	$i++;
-	ok(time()-$start < 2, "Connection attempt $i not blocked");
+	$time_spent = time()-$start;
+	ok($time_spent < 2, "Connection attempt $i not blocked") or diag "$time_spent sec spent";
 	$start = time();
 	if ($SOCKS_ERROR == SOCKS_WANT_READ) {
 		$sel->can_read(0.8);
@@ -80,13 +87,15 @@ $sock = IO::Socket::Socks->new(
 	AuthType => 'userpass', Blocking => 0
 );
 ok(defined($sock), 'Socks 5 non-blocking connect success');
-ok(time()-$start < 3, 'Socks 5 non-blocking connect time');
+$time_spent = time()-$start;
+ok($time_spent < 3, 'Socks 5 non-blocking connect time') or diag "$time_spent sec spent";
 $sel = IO::Select->new($sock);
 $i = 0;
 $start = time();
 until ($sock->ready) {
 	$i++;
-	ok(time()-$start < 2, "Connection attempt $i not blocked");
+	$time_spent = time()-$start;
+	ok($time_spent < 2, "Connection attempt $i not blocked") or diag "$time_spent sec spent";
 	$start = time();
 	if ($SOCKS_ERROR == SOCKS_WANT_READ) {
 		$sel->can_read(0.8);
@@ -110,7 +119,8 @@ if (defined $sock) {
 	$start = time();
 	until ($sock->ready) {
 		$i++;
-		ok(time()-$start < 2, "Connection attempt $i not blocked");
+		$time_spent = time()-$start;
+		ok($time_spent < 2, "Connection attempt $i not blocked") or diag "$time_spent sec spent";
 		$start = time();
 		if ($SOCKS_ERROR == SOCKS_WANT_READ) {
 			$sel->can_read(0.8);

@@ -1,19 +1,18 @@
 --- #YAML:1.0
 name:               IO-Socket-Socks
-version:            0.60
+version:            0.61
 abstract:           Provides a way to create socks client or server both 4 and 5 version.
 author:
     - Oleg G <oleg@cpan.org>
 license:            lgpl
 distribution_type:  module
 configure_requires:
-    ExtUtils::MakeMaker:  0
+    ExtUtils::MakeMaker:  6.52
 build_requires:
-    ExtUtils::MakeMaker:  0
+    Test::More:  0.88
 requires:
     IO::Select:        0
     IO::Socket::INET:  0
-    Test::More:        0.88
 resources:
     repository:  https://github.com/olegwtf/p5-IO-Socket-Socks
 no_index:
