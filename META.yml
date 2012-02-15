@@ -1,6 +1,6 @@
 --- #YAML:1.0
 name:               IO-Socket-Socks
-version:            0.61
+version:            0.62_1
 abstract:           Provides a way to create socks client or server both 4 and 5 version.
 author:
     - Oleg G <oleg@cpan.org>
@@ -11,6 +11,7 @@ configure_requires:
 build_requires:
     Test::More:  0.88
 requires:
+    constant:          1.03
     IO::Select:        0
     IO::Socket::INET:  0
 resources:
