@@ -1,26 +1,26 @@
---- #YAML:1.0
-name:               IO-Socket-Socks
-version:            0.62
-abstract:           Provides a way to create socks client or server both 4 and 5 version.
+---
+abstract: 'Provides a way to create socks client or server both 4 and 5 version.'
 author:
-    - Oleg G <oleg@cpan.org>
-license:            lgpl
-distribution_type:  module
-configure_requires:
-    ExtUtils::MakeMaker:  6.52
+  - 'Oleg G <oleg@cpan.org>'
 build_requires:
-    Test::More:  0.88
-requires:
-    constant:          1.03
-    IO::Select:        0
-    IO::Socket::INET:  0
-resources:
-    repository:  https://github.com/olegwtf/p5-IO-Socket-Socks
-no_index:
-    directory:
-        - t
-        - inc
-generated_by:       ExtUtils::MakeMaker version 6.56
+  Test::More: 0.88
+configure_requires:
+  ExtUtils::MakeMaker: 6.52
+dynamic_config: 1
+generated_by: 'ExtUtils::MakeMaker version 6.82, CPAN::Meta::Converter version 2.120351'
+license: open_source
 meta-spec:
-    url:      http://module-build.sourceforge.net/META-spec-v1.4.html
-    version:  1.4
+  url: http://module-build.sourceforge.net/META-spec-v1.4.html
+  version: 1.4
+name: IO-Socket-Socks
+no_index:
+  directory:
+    - t
+    - inc
+requires:
+  IO::Select: 0
+  IO::Socket::INET: 0
+  constant: 1.03
+resources:
+  repository: https://github.com/olegwtf/p5-IO-Socket-Socks
+version: 0.63_1
