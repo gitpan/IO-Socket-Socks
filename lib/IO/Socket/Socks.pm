@@ -1,24 +1,3 @@
-##############################################################################
-#
-#  This library is free software; you can redistribute it and/or
-#  modify it under the terms of the GNU Library General Public
-#  License as published by the Free Software Foundation; either
-#  version 2 of the License, or (at your option) any later version.
-#
-#  This library is distributed in the hope that it will be useful,
-#  but WITHOUT ANY WARRANTY; without even the implied warranty of
-#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-#  Library General Public License for more details.
-#
-#  You should have received a copy of the GNU Library General Public
-#  License along with this library; if not, write to the
-#  Free Software Foundation, Inc., 59 Temple Place - Suite 330,
-#  Boston, MA  02111-1307, USA.
-#
-#  Copyright (C) 2003 Ryan Eatmon
-#  Copyright (C) 2010-2012 Oleg G
-#
-##############################################################################
 package IO::Socket::Socks;
 
 use strict;
@@ -71,7 +50,7 @@ use constant
 %EXPORT_TAGS = (constants => ['SOCKS_WANT_READ', 'SOCKS_WANT_WRITE', @EXPORT_OK]);
 tie $SOCKS_ERROR, 'IO::Socket::Socks::ReadOnlyVar', IO::Socket::Socks::Error->new();
 
-$VERSION = '0.63_1';
+$VERSION = '0.63';
 $SOCKS5_RESOLVE = 1;
 $SOCKS4_RESOLVE = 0;
 $SOCKS_DEBUG = $ENV{SOCKS_DEBUG};
@@ -163,19 +142,33 @@ sub new_from_fd
     
     bless $sock, $class;
     
-    my $blocking = $sock->blocking;
     $sock->autoflush(1);
     ${*$sock}{'io_socket_timeout'} = delete $arg{Timeout};
     
     scalar(%arg) or return $sock;
-    if ($sock = $sock->configure(\%arg) and !defined $arg{Blocking} and !$blocking) {
-        $sock->blocking(0);
-    }
-    
-    return $sock;
+    return $sock->configure(\%arg);
 }
 
 *new_from_socket = \&new_from_fd;
+
+###############################################################################
+#
+# socket - override parent socket() to prevent recreation of already created socket
+#          this is useful for new_from_fd/new_from_socket
+###############################################################################
+sub socket
+{
+    my $self = shift;
+    
+    if (-S $self) {
+        ${*$self}{'io_socket_domain'} ||= $_[0];
+        ${*$self}{'io_socket_type'}   ||= $_[1];
+        ${*$self}{'io_socket_proto'}  ||= $_[2];
+        return $self;
+    }
+    
+    return $self->SUPER::socket(@_);
+}
 
 ###############################################################################
 #
