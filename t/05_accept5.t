@@ -1,7 +1,7 @@
 #!/usr/bin/env perl
 
 use Test::More;
-use IO::Socket::Socks;
+use IO::Socket::Socks qw(:DEFAULT :constants);
 use IO::Select;
 use strict;
 
@@ -64,6 +64,7 @@ do {
 				delete $local_clients{$client};
 			}
 			else {
+				$client->command_reply(REPLY_SUCCESS, '127.0.0.1', '1080');
 				delete $server_clients{$client};
 			}
 		}

@@ -4,7 +4,7 @@
       "Oleg G <oleg@cpan.org>"
    ],
    "dynamic_config" : 1,
-   "generated_by" : "ExtUtils::MakeMaker version 6.66, CPAN::Meta::Converter version 2.120921",
+   "generated_by" : "ExtUtils::MakeMaker version 6.98, CPAN::Meta::Converter version 2.120351",
    "license" : [
       "open_source"
    ],
@@ -38,11 +38,11 @@
          }
       }
    },
-   "release_status" : "stable",
+   "release_status" : "testing",
    "resources" : {
       "repository" : {
          "url" : "https://github.com/olegwtf/p5-IO-Socket-Socks"
       }
    },
-   "version" : "0.64"
+   "version" : "0.65_1"
 }

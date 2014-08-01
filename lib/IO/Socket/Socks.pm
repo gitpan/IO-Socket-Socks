@@ -3,7 +3,7 @@ package IO::Socket::Socks;
 use strict;
 use IO::Socket;
 use IO::Select;
-use Errno qw(EWOULDBLOCK EAGAIN ENOTCONN ETIMEDOUT);
+use Errno qw(EWOULDBLOCK EAGAIN ENOTCONN ETIMEDOUT ECONNABORTED);
 use Carp;
 use vars qw( @ISA @EXPORT @EXPORT_OK %EXPORT_TAGS $VERSION $SOCKS_ERROR $SOCKS5_RESOLVE $SOCKS4_RESOLVE $SOCKS_DEBUG %CODES );
 require Exporter;
@@ -50,7 +50,7 @@ use constant
 %EXPORT_TAGS = (constants => ['SOCKS_WANT_READ', 'SOCKS_WANT_WRITE', @EXPORT_OK]);
 tie $SOCKS_ERROR, 'IO::Socket::Socks::ReadOnlyVar', IO::Socket::Socks::Error->new();
 
-$VERSION = '0.64';
+$VERSION = '0.65_1';
 $SOCKS5_RESOLVE = 1;
 $SOCKS4_RESOLVE = 0;
 $SOCKS_DEBUG = $ENV{SOCKS_DEBUG};
@@ -2082,7 +2082,7 @@ sub _fail
 {
     if(!@_ || defined($_[0]))
     {
-        $SOCKS_ERROR->set(ETIMEDOUT, $@ = 'Timeout') if $SOCKS_ERROR == undef;
+        $SOCKS_ERROR->set(ECONNABORTED, $@ = 'Socket closed by remote side') if $SOCKS_ERROR == undef;
         return;
     }
     
