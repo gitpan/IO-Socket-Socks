@@ -23,4 +23,4 @@ requires:
   constant: 1.03
 resources:
   repository: https://github.com/olegwtf/p5-IO-Socket-Socks
-version: 0.65_1
+version: 0.65
