@@ -1,12 +1,14 @@
 package IO::Socket::Socks;
 
 use strict;
-use IO::Socket;
 use IO::Select;
-use Errno qw(EWOULDBLOCK EAGAIN ENOTCONN ETIMEDOUT ECONNABORTED);
+use Socket;
+use Errno qw(EWOULDBLOCK EAGAIN EINPROGRESS ETIMEDOUT ECONNABORTED);
 use Carp;
-use vars qw( @ISA @EXPORT @EXPORT_OK %EXPORT_TAGS $VERSION $SOCKS_ERROR $SOCKS5_RESOLVE $SOCKS4_RESOLVE $SOCKS_DEBUG %CODES );
+use vars qw( $SOCKET_CLASS @ISA @EXPORT @EXPORT_OK %EXPORT_TAGS $VERSION $SOCKS_ERROR $SOCKS5_RESOLVE $SOCKS4_RESOLVE $SOCKS_DEBUG %CODES );
 require Exporter;
+
+$VERSION = '0.66_1';
 
 use constant
 {
@@ -15,7 +17,25 @@ use constant
     ESOCKSPROTO => exists &Errno::EPROTO ? &Errno::EPROTO : 7000,
 };
 
-@ISA = qw(Exporter IO::Socket::INET);
+@ISA = ('Exporter');
+
+tie $SOCKET_CLASS, 'IO::Socket::Socks::SocketClassVar', $SOCKET_CLASS;
+unless ($SOCKET_CLASS)
+{
+    if (eval{require IO::Socket::IP; IO::Socket::IP->VERSION(0.35)})
+    {
+        $SOCKET_CLASS = 'IO::Socket::IP';
+    }
+    elsif (eval{require IO::Socket::INET6; IO::Socket::INET6->VERSION(2.62)})
+    {
+        $SOCKET_CLASS = 'IO::Socket::INET6';
+    }
+    else
+    {
+        $SOCKET_CLASS = 'IO::Socket::INET';
+    }
+}
+
 @EXPORT = qw( $SOCKS_ERROR SOCKS_WANT_READ SOCKS_WANT_WRITE ESOCKSPROTO );
 @EXPORT_OK = qw(
     SOCKS5_VER
@@ -33,6 +53,7 @@ use constant
     AUTHREPLY_FAILURE
     ISS_UNKNOWN_ADDRESS
     ISS_BAD_VERSION
+    ISS_CANT_RESOLVE
     REPLY_SUCCESS
     REPLY_GENERAL_FAILURE
     REPLY_CONN_NOT_ALLOWED
@@ -50,7 +71,6 @@ use constant
 %EXPORT_TAGS = (constants => ['SOCKS_WANT_READ', 'SOCKS_WANT_WRITE', @EXPORT_OK]);
 tie $SOCKS_ERROR, 'IO::Socket::Socks::ReadOnlyVar', IO::Socket::Socks::Error->new();
 
-$VERSION = '0.65';
 $SOCKS5_RESOLVE = 1;
 $SOCKS4_RESOLVE = 0;
 $SOCKS_DEBUG = $ENV{SOCKS_DEBUG};
@@ -78,6 +98,7 @@ use constant
     
     ISS_UNKNOWN_ADDRESS => 500,
     ISS_BAD_VERSION => 501,
+    ISS_CANT_RESOLVE => 502,
 };
 
 $CODES{AUTHMECH}->[AUTHMECH_INVALID]   = "No valid auth mechanisms";
@@ -425,12 +446,16 @@ sub connect
     #--------------------------------------------------------------------------
     # Establish a connection
     #--------------------------------------------------------------------------
-    my $sock = defined( ${*$self}->{SOCKS}->{TCP} ) ? 
+    my $ok = defined( ${*$self}->{SOCKS}->{TCP} ) ? 
                 ${*$self}->{SOCKS}->{TCP}->SUPER::connect(@_)
                 :
                 $self->SUPER::connect(@_);
 
-    if (!$sock)
+    if ($! == EINPROGRESS && $self->blocking == 0)
+    {
+        $SOCKS_ERROR->set(SOCKS_WANT_WRITE, 'Socks want write');
+    }
+    elsif (!$ok)
     {
         $SOCKS_ERROR->set($!, $@ = "Connection to proxy failed: $!");
         return;
@@ -448,7 +473,6 @@ sub _connect
 {
     my $self = shift;
     ${*$self}->{SOCKS}->{ready} = 0;
-    ${*$self}->{SOCKS}->{connected} = 0;
 
     if(${*$self}->{SOCKS}->{Version} == 4)
     {
@@ -476,8 +500,11 @@ sub _connect
         ];
     }
     
-    defined( $self->_run_queue() )
-        or return;
+    if ($SOCKS_ERROR == undef)
+    { # connection estabilished
+        defined( $self->_run_queue() )
+            or return;
+    }
     
     return $self;
 }
@@ -733,8 +760,8 @@ sub _socks5_connect_command
     # | 1  |  1  | X'00' |  1   | Variable |    2     |
     # +----+-----+-------+------+----------+----------+
     
-    my $atyp = $resolve ? ADDR_DOMAINNAME : ADDR_IPV4;
-    my $dstaddr = $resolve ? ${*$self}->{SOCKS}->{CmdAddr} : inet_aton(${*$self}->{SOCKS}->{CmdAddr});
+    my ($atyp, $dstaddr) = $resolve ? (ADDR_DOMAINNAME, ${*$self}->{SOCKS}->{CmdAddr}) : _resolve(${*$self}->{SOCKS}->{CmdAddr})
+        or $SOCKS_ERROR->set(ISS_CANT_RESOLVE, $@ = "Can't resolve `".${*$self}->{SOCKS}->{CmdAddr}."'"), return;
     my $hlen = length($dstaddr) if $resolve;
     my $dstport = pack('n', ${*$self}->{SOCKS}->{CmdPort});
     my $reply;
@@ -751,7 +778,7 @@ sub _socks5_connect_command
         );
         $debug->add(hlen => $hlen) if defined $hlen;
         $debug->add(
-            dstaddr => $resolve ? $dstaddr : (length($dstaddr) == 4 ? inet_ntoa($dstaddr) : undef),
+            dstaddr => $resolve ? $dstaddr : (length($dstaddr) == 4 ? inet_ntoa($dstaddr) : Socket::inet_ntop(AF_INET6, $dstaddr)),
             dstport => ${*$self}->{SOCKS}->{CmdPort}
         );
         $debug->show('Client Send: ');
@@ -825,6 +852,17 @@ sub _socks5_connect_reply
             $debug->add(bndaddr => $bndaddr);
         }
     }
+    elsif ($atyp == ADDR_IPV6)
+    {
+        $reply = $sock->_socks_read(16, ++$reads)
+            or return _fail($reply);
+        $bndaddr = length($reply) == 16 ? Socket::inet_ntop(AF_INET6, $reply) : undef;
+        
+        if($debug)
+        {
+            $debug->add(bndaddr => $bndaddr);
+        }
+    }
     else
     {
         $! = ESOCKSPROTO;
@@ -836,6 +874,7 @@ sub _socks5_connect_reply
         or return _fail($reply);
     $bndport = unpack('n', $reply);
     
+    ${*$self}->{SOCKS}->{DstAddrType} = $atyp;
     ${*$self}->{SOCKS}->{DstAddr} = $bndaddr;
     ${*$self}->{SOCKS}->{DstPort} = $bndport;
     
@@ -884,7 +923,8 @@ sub _socks4_connect_command
     # |  1  |  1  |    2     |       4       | variable |  1   |
     # +-----+-----+----------+---------------+----------+------+
     
-    my $dstaddr = $resolve ? inet_aton('0.0.0.1') : inet_aton(${*$self}->{SOCKS}->{CmdAddr});
+    my $dstaddr = $resolve ? inet_aton('0.0.0.1') : inet_aton(${*$self}->{SOCKS}->{CmdAddr})
+        or $SOCKS_ERROR->set(ISS_CANT_RESOLVE, $@ = "Can't resolve `".${*$self}->{SOCKS}->{CmdAddr}."'"), return;
     my $dstport = pack('n', ${*$self}->{SOCKS}->{CmdPort});
     my $userid  = ${*$self}->{SOCKS}->{Username} || '';
     my $dsthost = '';
@@ -943,6 +983,7 @@ sub _socks4_connect_reply
     substr($reply, 0, 4) = '';
     my $bndaddr = length($reply) == 4 ? inet_ntoa($reply) : undef;
     
+    ${*$self}->{SOCKS}->{DstAddrType} = ADDR_IPV4;
     ${*$self}->{SOCKS}->{DstAddr} = $bndaddr;
     ${*$self}->{SOCKS}->{DstPort} = $bndport;
     
@@ -1372,6 +1413,13 @@ sub _socks5_accept_command
         
         $dstaddr = length($request) == 4 ? inet_ntoa($request) : undef;
     }
+    elsif ($atyp == ADDR_IPV6)
+    {
+        $request = $self->_socks_read(16, ++$reads)
+            or return _fail($request);
+        
+        $dstaddr = length($request) == 16 ? Socket::inet_ntop(AF_INET6, $request) : undef;
+    }
     else
     { # unknown address type - how many bytes to read?
         ${*$self}->{SOCKS}->{queue} = [
@@ -1433,9 +1481,9 @@ sub _socks5_accept_command_reply
     # | 1  |  1  | X'00' |  1   | Variable |    2     |
     # +----+-----+-------+------+----------+----------+
     
-    my $atyp = $resolve ? ADDR_IPV4 : ADDR_DOMAINNAME;
-    my $bndaddr = $resolve ? inet_aton($host) : $host;
-    my $hlen = length($bndaddr) unless $resolve;
+    my ($atyp, $bndaddr) = $resolve ? _resolve($host) : (ADDR_DOMAINNAME, $host)
+        or $SOCKS_ERROR->set(ISS_CANT_RESOLVE, $@ = "Can't resolve `$host'"), return;
+    my $hlen = $resolve ? undef : length($bndaddr);
     my $rc; $rc = $self->_socks_send(pack('CCCC', SOCKS5_VER, $reply, 0, $atyp) . ($resolve ? '' : pack('C', $hlen)) . $bndaddr . pack('n', $port), ++$sends)
         or return _fail($rc);
     
@@ -1449,7 +1497,7 @@ sub _socks5_accept_command_reply
         );
         $debug->add(hlen => $hlen) unless $resolve;
         $debug->add(
-            bndaddr => $resolve ? (length($bndaddr) == 4 ? inet_ntoa($bndaddr) : undef) : $bndaddr,
+            bndaddr => $resolve ? ($atyp == ADDR_IPV4 ? inet_ntoa($bndaddr) : Socket::inet_ntop(AF_INET6, $bndaddr)) : $bndaddr,
             bndport => $port
         );
         $debug->show('Server Send: ');
@@ -1622,7 +1670,8 @@ sub _socks4_accept_command_reply
     # |  1  |  1  |    2     |       4       |
     # +-----+-----+----------+---------------+
     
-    my $bndaddr = inet_aton($host);
+    my $bndaddr = inet_aton($host)
+        or $SOCKS_ERROR->set(ISS_CANT_RESOLVE, $@ = "Can't resolve `$host'"), return;
     my $rc; $rc = $self->_socks_send(pack('CCna*', 0, $reply, $port, $bndaddr), ++$sends)
         or return _fail($rc);
     
@@ -1709,7 +1758,7 @@ sub command_reply
 sub dst
 {
     my $self = shift;
-    return (${*$self}->{SOCKS}->{DstAddr}, ${*$self}->{SOCKS}->{DstPort});
+    return @{${*$self}->{SOCKS}}{qw/DstAddr DstPort DstAddrType/};
 }
 
 ###############################################################################
@@ -1843,6 +1892,12 @@ sub recv
         $dstaddr = length($dstaddr) == 4 ? inet_ntoa($dstaddr) : undef;
         substr($_[0], 0, 4) = '';
     }
+    elsif($atyp == ADDR_IPV6)
+    {
+        $dstaddr = substr($_[0], 0, 16);
+        $dstaddr = length($dstaddr) == 16 ? Socket::inet_ntop(AF_INET6, $dstaddr) : undef;
+        substr($_[0], 0, 16) = '';
+    }
     else
     {
         $! = ESOCKSPROTO;
@@ -1901,8 +1956,6 @@ sub _socks_send
             $rc = $self->syswrite($data);
             if(defined $rc)
             {
-                ${*$self}->{SOCKS}->{connected} = 1 unless ${*$self}->{SOCKS}->{connected};
-                
                 if($rc > 0)
                 {
                     ${*$self}->{SOCKS}->{queue}[0][Q_BUF] += $rc;
@@ -1913,8 +1966,7 @@ sub _socks_send
                     last;
                 }
             }
-            elsif($! == EWOULDBLOCK || $! == EAGAIN || 
-                 ($! == ENOTCONN && !${*$self}->{SOCKS}->{connected}))
+            elsif($! == EWOULDBLOCK || $! == EAGAIN)
             {
                 $SOCKS_ERROR->set(SOCKS_WANT_WRITE, 'Socks want write');
                 return undef;
@@ -2089,6 +2141,23 @@ sub _fail
     return -1;
 }
 
+sub _resolve
+{
+    my $addr = shift;
+    my ($err, @res) = Socket::getaddrinfo($addr, undef, {protocol => Socket::IPPROTO_TCP, socktype => SOCK_STREAM});
+    return if $err;
+    
+    for my $r (@res)
+    {
+        if ($r->{family} == PF_INET)
+        {
+            return (ADDR_IPV4, (unpack_sockaddr_in($r->{addr}))[1]);
+        }
+    }
+    
+    return (ADDR_IPV6, (unpack_sockaddr_in6($res[0]{addr}))[1]);
+}
+
 ###############################################################################
 #+-----------------------------------------------------------------------------
 #| Helper Package to bring some magic in $SOCKS_ERROR
@@ -2167,6 +2236,39 @@ sub FETCH
 }
 
 *STORE = *UNTIE = sub { Carp::croak 'Modification of readonly value attempted' };
+
+###############################################################################
+#+-----------------------------------------------------------------------------
+#| Helper Package to handle assigning of $SOCKET_CLASS
+#+-----------------------------------------------------------------------------
+###############################################################################
+
+package IO::Socket::Socks::SocketClassVar;
+
+sub TIESCALAR
+{
+    my ($class, $value) = @_;
+    bless {v => $value}, $class;
+}
+
+sub FETCH
+{
+    return $_[0]->{v};
+}
+
+sub STORE
+{
+    my ($self, $class) = @_;
+    
+    $self->{v} = $class;
+    eval "use $class; 1" or die $@;
+    $IO::Socket::Socks::ISA[1] = $class;
+}
+
+sub UNTIE
+{
+    Carp::croak 'Untie of tied variable is denied';
+}
 
 ###############################################################################
 #+-----------------------------------------------------------------------------
@@ -2543,6 +2645,7 @@ Both takes the following config hash:
                   For socks v4: allow use socks4a protocol extension if
                   true and not otherwise.
                   This overrides value of $SOCKS4_RESOLVE or $SOCKS5_RESOLVE.
+                  See also command_reply().
   
   SocksDebug => This will cause all of the SOCKS traffic to
                 be presented on the command line in a form
@@ -2665,8 +2768,13 @@ is.  The REPLY CODE is one of the constants as follows (integer value):
   REPLY_CMD_NOT_SUPPORTED(7): Command Not Supported
   REPLY_ADDR_NOT_SUPPORTED(8): Address Not Supported
 
-HOST and PORT are the resulting host and port that you use for the
-command.
+HOST and PORT are the resulting host and port (where server socket responsible for this command bound).
+
+Note: for 5 version C<command_reply> will try to resolve passed address if
+C<SocksResolve> has true value and passed address is domain name. To avoid this just pass ip address
+(C<$socket-E<gt>sockhost>) instead of host name or turn off C<SocksResolve> for this server. For version 4
+passed host name will always be resolved to ip address even if C<SocksResolve> has false value. Because
+this version doesn't support C<ADDRESS> as domain name.
 
 =head1 VARIABLES
 
